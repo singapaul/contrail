@@ -22,13 +22,27 @@ Open a couple of browser tabs to see the multiplayer working.
 | `PORT` | 3000 | HTTP/WebSocket port |
 | `BOT_FILL` | 30 | Bots top each arena up to this many planes |
 | `MIN_BOTS` | 8 | Bots that always stay in an arena |
-| `ROOM_HUMANS` | 50 | Real players per arena before a new arena opens automatically |
+| `ROOM_HUMANS` | 50 | Players per arena before a new arena opens automatically (menu tabs don't count) |
+| `MAX_ROOMS` | 2 | Arenas per process. When all are full, new players see "Servers are full" and retry by themselves |
+| `MAX_PER_IP` | 8 | WebSocket connections allowed per IP |
+| `TRUST_PROXY` | off | Set to `1` behind Cloudflare/Caddy so the real client IP is read from `CF-Connecting-IP` / `X-Forwarded-For` |
+| `ALLOWED_ORIGINS` | (any) | Comma-separated origins allowed to open a WebSocket, e.g. `https://contrail.io` |
 
-## Launch (about 30 minutes)
+## Launch on a Hetzner VPS (about 30 minutes)
 
-1. **Host:** It's one Node process with no database. It works on Render, Railway, Fly.io, or any $5–10/month VPS (Hetzner, DigitalOcean). WebSockets must be allowed. All of these support them.
-2. **Domain:** Buy a short `.io` domain and put Cloudflare in front of it for free HTTPS (`wss://` works automatically).
-3. **Capacity:** One small VPS has been load-tested at about 45 players and about 13 KB/s per player at about 10% of one CPU core. Arenas split automatically. For thousands of players at once, run one process per region and let players pick the nearest.
+It's one long-running Node process holding WebSockets, so it needs a server, not static/serverless hosting (Netlify/Vercel won't work).
+
+1. **Server:** create a Hetzner **CX22** (Ubuntu 24.04, ~€5/month, 20 TB traffic included) with your SSH key.
+2. **Domain + Cloudflare:** buy the domain, add it to Cloudflare, create an `A` record to the server IP (proxied, orange cloud) and set SSL/TLS mode to **Full (strict)**.
+3. **Set up the box (once):**
+   ```bash
+   ssh root@SERVER_IP 'bash -s' < deploy/setup.sh play.yourdomain.io
+   ```
+   This installs Node 22, Caddy (automatic HTTPS) and the `contrail` systemd service, and opens ports 22/80/443.
+4. **Check:** `curl https://play.yourdomain.io/health` shows each arena's seated players and the tick time.
+5. **Deploy updates:** `./deploy/deploy.sh root@SERVER_IP` (git pull + restart). Players see "Server updating" and reconnect by themselves.
+
+**Capacity** (load test, `node scripts/loadtest.js 50`): about **40 KB/s per player** (a full 50-player arena ≈ 16 Mbps, ≈ 5 TB/month if full all day). One full arena takes ~10 ms of the 33 ms tick budget on an M3 Pro; 4 full arenas overloaded it. So `MAX_ROOMS=2` by default; re-run the load test on the real server and raise it only while `/health` `tick.maxMs` stays under ~20 ms. Beyond that, run more servers/regions.
 
 ## Making money
 

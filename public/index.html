@@ -305,7 +305,26 @@ function trimTrail(p) {
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
   ws.onmessage = e => handle(JSON.parse(e.data));
-  ws.onclose = () => { for (const id of [...planes.keys()]) removePlane(id); orbs.clear(); $('online').textContent = 'reconnecting…'; if (playing) showMenu(); setTimeout(connect, 1500); };
+  ws.onclose = e => {
+    clearWorld(); if (playing) showMenu();
+    // 4xxx = server told us why (busy, updating, too many tabs); show it and back off. 4503 = restart, come back quickly.
+    const custom = e.code >= 4000;
+    $('online').textContent = custom && e.reason ? e.reason : 'reconnecting…';
+    setTimeout(connect, !custom || e.code === 4503 ? 1500 : 10000);
+  };
+}
+function clearWorld() { for (const id of [...planes.keys()]) removePlane(id); orbs.clear(); }
+let fullRetry = null;
+function serverFull() {
+  // Every arena is full: go back to the menu and retry on our own.
+  playing = false; clearTimeout(fullRetry);
+  $('dead').classList.add('hidden'); showMenu();
+  let s = 10; const tickDown = () => {
+    if (playing) return;
+    if (s <= 0) { fullRetry = null; play(); return; }
+    $('online').textContent = `Servers are full, retrying in ${s--}s…`; fullRetry = setTimeout(tickDown, 1000);
+  };
+  tickDown();
 }
 function handle(m) {
   switch (m.t) {
@@ -329,10 +348,13 @@ function handle(m) {
       if (m.d) for (const [x, y, h, c] of m.d) explode(x, y, h, COLORS[c] || '#fff');
       break;
     }
-    case 'lb': lb = m; renderBoard(); $('online').textContent = m.n + ' planes in the air'; break;
+    case 'lb': lb = m; renderBoard(); if (!fullRetry) $('online').textContent = m.n + ' planes in the air'; break;
     case 'k': pushFeed(m.m); break;
     case 'kill': toast('💥 You shot down ' + m.name + '!'); break;
     case 'dead': onDead(m); break;
+    case 'reset': clearWorld(); break;
+    case 'full': serverFull(); break;
+    case 'restart': toast('🔧 Server updating, back in a moment…'); $('online').textContent = 'Server updating, reconnecting…'; break;
   }
 }
 
@@ -382,7 +404,7 @@ $('invert').onchange = () => store.set('invert', $('invert').checked ? '1' : '0'
 function play() {
   if (!ws || ws.readyState !== 1) return;
   const name = $('name').value.trim(); store.set('name', name);
-  ws.send(JSON.stringify({ t: 'join', name, c: colorIdx }));
+  ws.send(JSON.stringify({ t: 'join', name, c: colorIdx })); clearTimeout(fullRetry); fullRetry = null;
   playing = true; sent = ''; deadAt = null;
   $('menu').classList.add('hidden'); $('dead').classList.add('hidden'); $('ui').style.display = 'block';
   if (isTouch) bb.style.display = 'flex';
