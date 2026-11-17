@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Contrail — Low-poly dogfights</title>
+<meta name="description" content="Fly a low-poly plane, leave a contrail, make other pilots crash into it. Free 3D multiplayer browser game.">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:100%;height:100%;overflow:hidden;background:#9fd3f5;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;user-select:none;-webkit-user-select:none;touch-action:none}
+  canvas{display:block;position:fixed;inset:0}
+  #hud{pointer-events:none}
+  .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(10,30,60,.25)}
+  .panel{background:rgba(255,255,255,.95);border-radius:22px;padding:28px 30px;width:min(92vw,410px);text-align:center;box-shadow:0 20px 60px rgba(0,20,60,.35)}
+  h1{font-size:46px;font-weight:900;letter-spacing:-1px;color:#13315c;line-height:1}
+  h1 span{color:#ff8a3d}
+  .tag{color:#4b6584;margin:8px 0 20px;font-size:15px}
+  input[type=text]{width:100%;padding:14px 16px;border-radius:12px;border:2px solid #d5e3f3;font-size:18px;outline:none;text-align:center;font-weight:600}
+  input[type=text]:focus{border-color:#4da6ff}
+  .swatches{display:flex;gap:6px;justify-content:center;margin:14px 0 12px}
+  .sw{width:25px;height:25px;border-radius:50%;cursor:pointer;border:3px solid transparent;box-shadow:0 0 0 1px rgba(0,0,0,.15)}
+  .sw.on{border-color:#13315c;transform:scale(1.15)}
+  .opt{font-size:13px;color:#4b6584;margin-bottom:14px;display:flex;gap:6px;align-items:center;justify-content:center;cursor:pointer}
+  button.play{width:100%;padding:15px;border:0;border-radius:14px;background:linear-gradient(#ffa24d,#ff7a1a);color:#fff;font-size:22px;font-weight:800;cursor:pointer;box-shadow:0 5px 0 #c4570a}
+  button.play:active{transform:translateY(3px);box-shadow:0 2px 0 #c4570a}
+  .how{margin-top:16px;font-size:13px;color:#4b6584;line-height:1.6}
+  .online{margin-top:12px;font-size:13px;color:#2e8b57;font-weight:700}
+  .online:before{content:"";display:inline-block;width:8px;height:8px;background:#2ecc71;border-radius:50%;margin-right:6px}
+  .ad-slot{margin:16px auto 0;width:300px;max-width:100%;height:250px;border:2px dashed #b8c9dd;border-radius:10px;display:flex;align-items:center;justify-content:center;color:#8aa0b8;font-size:13px}
+  .stats{display:flex;justify-content:space-around;margin:16px 0}
+  .stats b{display:block;font-size:28px;color:#13315c}
+  .stats small{color:#6b7f99;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+  #deadTitle{font-size:28px;font-weight:900;color:#c0392b}
+  #best{font-size:13px;color:#6b7f99}
+  #ui{position:fixed;inset:0;pointer-events:none;display:none;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6)}
+  #lb{position:absolute;right:12px;top:12px;background:rgba(0,30,60,.4);border-radius:12px;padding:10px 14px;min-width:190px;font-size:14px}
+  #lb h3{font-size:12px;letter-spacing:2px;opacity:.8;margin-bottom:6px}
+  #lbRows div{display:flex;justify-content:space-between;gap:12px;line-height:1.5}
+  #lbRows .me{color:#ffe14d;font-weight:800}
+  #feed{position:absolute;left:14px;top:12px;font-size:14px;font-weight:600}
+  #feed div{transition:opacity .5s;margin-bottom:3px}
+  #toast{position:absolute;left:50%;top:20%;transform:translateX(-50%);font-size:30px;font-weight:900;color:#ffe14d;opacity:0;transition:opacity .3s;white-space:nowrap}
+  #boostBtn{position:fixed;right:18px;bottom:170px;width:84px;height:84px;border-radius:50%;background:rgba(255,138,61,.75);color:#fff;font-weight:900;display:none;align-items:center;justify-content:center;font-size:14px;border:3px solid rgba(255,255,255,.7)}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<canvas id="hud"></canvas>
+
+<div id="ui">
+  <div id="feed"></div>
+  <div id="lb"><h3>LEADERBOARD</h3><div id="lbRows"></div></div>
+  <div id="toast"></div>
+</div>
+<div id="boostBtn">BOOST</div>
+
+<div class="overlay" id="menu">
+  <div class="panel">
+    <h1>Contrail<span>.io</span></h1>
+    <p class="tag">Low-poly dogfights. Your contrail is your weapon.</p>
+    <input type="text" id="name" maxlength="16" placeholder="Callsign" autocomplete="off">
+    <div class="swatches" id="swatches"></div>
+    <label class="opt"><input type="checkbox" id="invert"> Flight-sim controls (pull back to climb)</label>
+    <button class="play" id="playBtn">TAKE OFF</button>
+    <div class="how">🖱️ Mouse = flight stick (left/right to turn, up/down to climb/dive)<br>⌨️ WASD / arrows also work · Hold click, Space or Shift to boost<br>Collect fuel to grow your contrail. Anyone who hits it goes down.</div>
+    <div class="online" id="online">connecting…</div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="dead">
+  <div class="panel">
+    <div id="deadTitle">SHOT DOWN</div>
+    <div id="deadBy" style="color:#4b6584;margin-top:4px"></div>
+    <div class="stats">
+      <div><b id="dScore">0</b><small>Score</small></div>
+      <div><b id="dKills">0</b><small>Kills</small></div>
+      <div><b id="dTime">0s</b><small>Airtime</small></div>
+    </div>
+    <div id="best"></div>
+    <button class="play" id="againBtn" style="margin-top:14px">FLY AGAIN</button>
+    <!-- Monetization: replace with your ad network tag (CrazyGames/Poki SDK midgame ad, or AdinPlay/AdSense 300x250) -->
+    <div class="ad-slot" id="adSlot">Ad space 300×250</div>
+  </div>
+</div>
+
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ---- shared formulas (must match server) ----
+const trailTarget = s => Math.min(7000, 160 + s * 3);
+const planeWidth = s => 16 + Math.min(34, Math.sqrt(s) * 1.1);
+let COLORS = ['#ff4d4d','#ffb020','#ffe14d','#4dff88','#2ee6d6','#4da6ff','#a066ff','#ff66c4','#ffffff','#ff8a3d'];
+let R = 3000, CEIL = 340, ISLANDS = [];
+
+const $ = id => document.getElementById(id);
+const store = { get(k){ try { return localStorage.getItem(k); } catch { return null; } }, set(k,v){ try { localStorage.setItem(k,v); } catch {} } };
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const isTouch = 'ontouchstart' in window;
+
+// ---------- three.js scene ----------
+const renderer = new THREE.WebGLRenderer({ canvas: $('c'), antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+const scene = new THREE.Scene();
+const SKY = new THREE.Color(0xa8d8f8);
+scene.background = SKY;
+scene.fog = new THREE.Fog(SKY, 500, 1800);
+const camera = new THREE.PerspectiveCamera(70, 1, 1, 6000);
+scene.add(new THREE.HemisphereLight(0xe8f6ff, 0x3b6a7d, 1.4));
+const sun = new THREE.DirectionalLight(0xfff4dd, 1.8); sun.position.set(0.6, 1, 0.35); scene.add(sun);
+
+const hud = $('hud'), hx = hud.getContext('2d');
+let W, H, DPR;
+function resize() {
+  W = innerWidth; H = innerHeight; DPR = Math.min(2, devicePixelRatio || 1);
+  renderer.setSize(W, H); camera.aspect = W / H; camera.updateProjectionMatrix();
+  hud.width = W * DPR; hud.height = H * DPR; hud.style.width = W + 'px'; hud.style.height = H + 'px';
+}
+addEventListener('resize', resize); resize();
+
+// Server (x, y, h) → three (x, h, y)
+const V = (x, y, h) => new THREE.Vector3(x, h, y);
+
+// Ocean — low-poly faceted
+{
+  const g = new THREE.PlaneGeometry(14000, 14000, 70, 70); g.rotateX(-Math.PI / 2);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setY(i, Math.random() * 6 - 3);
+  const ocean = new THREE.Mesh(g.toNonIndexed(), new THREE.MeshLambertMaterial({ color: 0x2b86c5, flatShading: true }));
+  ocean.position.y = -2; scene.add(ocean);
+}
+// Storm wall
+const storm = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 900, 96, 1, true),
+  new THREE.MeshBasicMaterial({ color: 0xff3366, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }));
+storm.position.y = 300; scene.add(storm);
+
+const terrainGroup = new THREE.Group(); scene.add(terrainGroup);
+function buildTerrain() {
+  terrainGroup.clear();
+  storm.scale.set(R, 1, R);
+  const green = new THREE.Color(0x4f9a45), rock = new THREE.Color(0x8a8378), snow = new THREE.Color(0xf6f8fb), sand = new THREE.Color(0xe8d49a);
+  ISLANDS.forEach(([x, y, r, h], n) => {
+    let seed = n * 7919 + 17; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const g = new THREE.ConeGeometry(r, h, 10, 4).toNonIndexed();
+    const p = g.attributes.position, cols = [];
+    for (let i = 0; i < p.count; i++) {
+      const vy = p.getY(i);
+      if (vy < h / 2 - 1) { const k = 1 + (Math.sin(p.getX(i) * 0.05 + n) + Math.cos(p.getZ(i) * 0.05)) * 0.04; p.setX(i, p.getX(i) * k); p.setZ(i, p.getZ(i) * k); }
+    }
+    for (let i = 0; i < p.count; i += 3) {
+      const yy = (p.getY(i) + p.getY(i+1) + p.getY(i+2)) / 3 + h / 2, t = yy / h;
+      const c = (t > 0.72 && h > 170) ? snow : t > 0.45 ? rock.clone().lerp(green, 0.2) : green.clone().lerp(rock, t);
+      for (let k = 0; k < 3; k++) cols.push(c.r, c.g, c.b);
+    }
+    g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3)); g.computeVertexNormals();
+    const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
+    m.position.set(x, h / 2 - 2, y); m.rotation.y = rnd() * 6; terrainGroup.add(m);
+    const beach = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.12, r * 1.18, 4, 12), new THREE.MeshLambertMaterial({ color: sand, flatShading: true }));
+    beach.position.set(x, -1, y); terrainGroup.add(beach);
+  });
+}
+// Decorative clouds
+{
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8a9bb0, flatShading: true, transparent: true, opacity: 0.9 });
+  const geo = new THREE.IcosahedronGeometry(1, 0);
+  for (let i = 0; i < 90; i++) {
+    const g = new THREE.Group(), a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * 3400;
+    g.position.set(Math.cos(a) * d, 230 + Math.random() * 260, Math.sin(a) * d);
+    const n = 3 + (Math.random() * 4 | 0);
+    for (let k = 0; k < n; k++) {
+      const m = new THREE.Mesh(geo, mat), s = 25 + Math.random() * 35;
+      m.scale.set(s * 1.4, s * 0.8, s); m.position.set((k - n / 2) * 35 + Math.random() * 20, Math.random() * 15, Math.random() * 30);
+      m.rotation.set(Math.random() * 3, Math.random() * 3, 0); g.add(m);
+    }
+    g.rotation.y = Math.random() * 6; scene.add(g);
+  }
+}
+
+// ---------- plane model ----------
+const matCache = new Map();
+const lam = c => { if (!matCache.has(c)) matCache.set(c, new THREE.MeshLambertMaterial({ color: c, flatShading: true })); return matCache.get(c); };
+const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+function makePlane(color) {
+  const g = new THREE.Group(), body = lam(0xf2f4f7), paint = lam(color), dark = lam(0x1d3557);
+  const add = (geo, mat, x, y, z, rz = 0) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.z = rz; g.add(m); return m; };
+  add(new THREE.CylinderGeometry(2.3, 1.1, 22, 6), body, 0, 0, 0, -Math.PI / 2);
+  add(new THREE.ConeGeometry(2.3, 4, 6), paint, 13, 0, 0, -Math.PI / 2);
+  add(box(6, 0.6, 34), paint, 1.5, -0.6, 0);
+  add(box(3.5, 0.5, 12), paint, -9.5, 0.4, 0);
+  add(box(4, 6, 0.6), paint, -9.5, 3.2, 0);
+  add(box(5, 1.8, 2.8), dark, 4, 2, 0);
+  const prop = add(box(0.4, 9, 0.9), dark, 15.3, 0, 0);
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(1.6, 10, 6), new THREE.MeshBasicMaterial({ color: 0xffa020 }));
+  flame.rotation.z = Math.PI / 2; flame.position.set(-16, 0, 0); flame.visible = false; g.add(flame);
+  g.rotation.order = 'YZX';
+  g.userData = { prop, flame };
+  return g;
+}
+function nameSprite(text) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  const x = c.getContext('2d'); x.font = '700 30px system-ui,sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineWidth = 6; x.strokeStyle = 'rgba(0,0,0,.55)'; x.strokeText(text, 128, 32); x.fillStyle = '#fff'; x.fillText(text, 128, 32);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  s.scale.set(48, 12, 1); return s;
+}
+
+// ---------- contrail tube ----------
+const SIDES = 6;
+const _t = new THREE.Vector3(), _s = new THREE.Vector3(), _u = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
+class Tube {
+  constructor(color, mine) {
+    this.cap = 0;
+    this.mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(0xffffff).lerp(new THREE.Color(color), mine ? 0.45 : 0.3), emissive: new THREE.Color(0x707780).lerp(new THREE.Color(color), 0.25), flatShading: true, transparent: true, opacity: mine ? 0.6 : 0.92, depthWrite: !mine });
+    this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), this.mat); this.mesh.frustumCulled = false; scene.add(this.mesh);
+  }
+  ensure(n) {
+    if (n <= this.cap) return;
+    let cap = Math.max(128, this.cap); while (cap < n) cap *= 2; this.cap = cap;
+    const g = new THREE.BufferGeometry(), vc = cap * SIDES;
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vc * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    const nrm = new Float32Array(vc * 3); for (let i = 1; i < nrm.length; i += 3) nrm[i] = 1;
+    g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    const idx = new (vc > 65535 ? Uint32Array : Uint16Array)((cap - 1) * SIDES * 6); let k = 0;
+    for (let i = 0; i < cap - 1; i++) for (let s = 0; s < SIDES; s++) {
+      const a = i * SIDES + s, b = i * SIDES + (s + 1) % SIDES, c = a + SIDES, d = b + SIDES;
+      idx[k++] = a; idx[k++] = b; idx[k++] = c; idx[k++] = b; idx[k++] = d; idx[k++] = c;
+    }
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    this.mesh.geometry.dispose(); this.mesh.geometry = g;
+  }
+  update(pts, head, radius) {
+    const n = pts.length; if (n < 2) { this.mesh.visible = false; return; }
+    this.mesh.visible = true; this.ensure(n);
+    const pos = this.mesh.geometry.attributes.position.array;
+    const P = i => i === n - 1 ? head : pts[i];
+    for (let i = 0; i < n; i++) {
+      const a = P(Math.max(0, i - 1)), b = P(Math.min(n - 1, i + 1)), c = P(i);
+      _t.set(b[0] - a[0], b[2] - a[2], b[1] - a[1]).normalize();
+      _s.crossVectors(_t, UP); if (_s.lengthSq() < 1e-6) _s.set(1, 0, 0); _s.normalize();
+      _u.crossVectors(_s, _t);
+      const r = radius * Math.min(1, (i + 1) / 14) * Math.min(1, 0.15 + (n - 1 - i) / 12);
+      for (let s = 0; s < SIDES; s++) {
+        const ang = s / SIDES * Math.PI * 2, cs = Math.cos(ang) * r, sn = Math.sin(ang) * r, o = (i * SIDES + s) * 3;
+        pos[o] = c[0] + _s.x * cs + _u.x * sn; pos[o + 1] = c[2] + _s.y * cs + _u.y * sn; pos[o + 2] = c[1] + _s.z * cs + _u.z * sn;
+      }
+    }
+    this.mesh.geometry.attributes.position.needsUpdate = true;
+    this.mesh.geometry.setDrawRange(0, (n - 1) * SIDES * 6);
+  }
+  dispose() { scene.remove(this.mesh); this.mesh.geometry.dispose(); this.mat.dispose(); }
+}
+
+// ---------- orbs (instanced) ----------
+const MAX_ORBS = 5000;
+const orbMesh = new THREE.InstancedMesh(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ color: 0xffffff }), MAX_ORBS);
+orbMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); orbMesh.frustumCulled = false; scene.add(orbMesh);
+const orbColors = () => COLORS.map(c => new THREE.Color(c));
+let ORB_COLS = orbColors();
+const dummy = new THREE.Object3D();
+
+// ---------- explosions ----------
+const partGeo = new THREE.TetrahedronGeometry(3, 0);
+const partMats = [0xff7a1a, 0xffc040, 0x555555, 0x333333].map(c => new THREE.MeshBasicMaterial({ color: c, transparent: true }));
+let parts = [];
+function explode(x, y, h, color) {
+  const cm = new THREE.MeshBasicMaterial({ color, transparent: true });
+  for (let i = 0; i < 36; i++) {
+    const m = new THREE.Mesh(partGeo, i % 4 === 0 ? cm : partMats[i % 4]);
+    m.position.set(x, h, y);
+    const v = new THREE.Vector3(Math.random() - .5, Math.random() - .3, Math.random() - .5).normalize().multiplyScalar(2 + Math.random() * 6);
+    scene.add(m); parts.push({ m, v, life: 1, s: 1 + Math.random() * 2.5 });
+  }
+}
+
+// ---------- state ----------
+let ws, myId = 0, playing = false, lastPacket = performance.now(), tickMs = 1000 / 30;
+const planes = new Map(), orbs = new Map();
+let lb = { top: [], mm: [], rank: 0, n: 0 };
+let colorIdx = +(store.get('color') ?? (Math.random() * 10 | 0)) % 10;
+let stick = { x: 0, y: 0 }, keys = {}, boost = false, sent = '';
+let camPos = new THREE.Vector3(0, 300, 900), camLook = new THREE.Vector3(), fov = 70, specAngle = 0, deadAt = null;
+
+function addPlane(id, name, color, score, a, pitch, trail) {
+  const len = trail.reduce((s, p, i) => i ? s + Math.hypot(p[0]-trail[i-1][0], p[1]-trail[i-1][1], p[2]-trail[i-1][2]) : 0, 0);
+  const h = trail[trail.length - 1];
+  const obj = makePlane(color); scene.add(obj);
+  const label = nameSprite(name); scene.add(label);
+  const pl = { id, name, color, score, a, pa: a, pitch, pp: pitch, roll: 0, pr: 0, trail, len, x: h[0], y: h[1], h: h[2], px: h[0], py: h[1], ph: h[2], boost: 0,
+    obj, label, tube: new Tube(color, id === myId) };
+  planes.set(id, pl);
+}
+function removePlane(id) {
+  const p = planes.get(id); if (!p) return;
+  scene.remove(p.obj); scene.remove(p.label); p.label.material.map.dispose(); p.label.material.dispose(); p.tube.dispose();
+  planes.delete(id);
+}
+function trimTrail(p) {
+  const t = p.trail, target = trailTarget(p.score);
+  while (p.len > target && t.length > 2) { p.len -= Math.hypot(t[1][0]-t[0][0], t[1][1]-t[0][1], t[1][2]-t[0][2]); t.shift(); }
+}
+
+// ---------- networking ----------
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onclose = () => { for (const id of [...planes.keys()]) removePlane(id); orbs.clear(); $('online').textContent = 'reconnecting…'; if (playing) showMenu(); setTimeout(connect, 1500); };
+}
+function handle(m) {
+  switch (m.t) {
+    case 'welcome': R = m.R; CEIL = m.CEIL; ISLANDS = m.islands; COLORS = m.colors; ORB_COLS = orbColors(); buildTerrain(); buildSwatches(); $('online').textContent = 'Arena live'; break;
+    case 's': {
+      const now = performance.now(); tickMs = tickMs * 0.9 + clamp(now - lastPacket, 10, 100) * 0.1; lastPacket = now;
+      myId = m.me;
+      if (m.n) for (const [id, name, color, score, a, pitch, flat] of m.n) {
+        const tr = []; for (let i = 0; i < flat.length; i += 3) tr.push([flat[i], flat[i+1], flat[i+2]]);
+        removePlane(id); addPlane(id, name, color, score, a / 100, pitch / 100, tr);
+      }
+      if (m.p) for (const [id, x, y, h, a, pitch, roll, score, b] of m.p) {
+        const p = planes.get(id); if (!p) continue;
+        p.px = p.x; p.py = p.y; p.ph = p.h; p.pa = p.a; p.pp = p.pitch; p.pr = p.roll;
+        p.x = x; p.y = y; p.h = h; p.a = a / 100; p.pitch = pitch / 100; p.roll = roll / 100; p.score = score; p.boost = b;
+        const l = p.trail[p.trail.length - 1]; p.len += Math.hypot(x - l[0], y - l[1], h - l[2]); p.trail.push([x, y, h]); trimTrail(p);
+      }
+      if (m.g) for (const id of m.g) removePlane(id);
+      if (m.o) for (const [id, x, y, h, v, c] of m.o) orbs.set(id, { x, y, h, v, c, born: now });
+      if (m.x) for (const id of m.x) orbs.delete(id);
+      if (m.d) for (const [x, y, h, c] of m.d) explode(x, y, h, COLORS[c] || '#fff');
+      break;
+    }
+    case 'lb': lb = m; renderBoard(); $('online').textContent = m.n + ' planes in the air'; break;
+    case 'k': pushFeed(m.m); break;
+    case 'kill': toast('💥 You shot down ' + m.name + '!'); break;
+    case 'dead': onDead(m); break;
+  }
+}
+
+// ---------- input ----------
+addEventListener('mousemove', e => { stick.x = (e.clientX - W / 2) / (W * 0.35); stick.y = (e.clientY - H / 2) / (H * 0.35); });
+$('c').addEventListener('mousedown', () => boost = true);
+addEventListener('mouseup', () => boost = false);
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code) && playing) e.preventDefault();
+  if (e.code === 'Enter' && !playing && !$('menu').classList.contains('hidden')) play();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+let touchO = null;
+$('c').addEventListener('touchstart', e => { const t = e.touches[0]; touchO = [t.clientX, t.clientY]; e.preventDefault(); }, { passive: false });
+$('c').addEventListener('touchmove', e => { const t = e.touches[0]; if (touchO) { stick.x = (t.clientX - touchO[0]) / 70; stick.y = (t.clientY - touchO[1]) / 70; } e.preventDefault(); }, { passive: false });
+$('c').addEventListener('touchend', () => { touchO = null; stick.x = stick.y = 0; });
+const bb = $('boostBtn');
+bb.addEventListener('touchstart', e => { boost = true; e.preventDefault(); }, { passive: false });
+bb.addEventListener('touchend', e => { boost = false; e.preventDefault(); }, { passive: false });
+const dz = v => { const a = Math.abs(v); return a < 0.06 ? 0 : Math.sign(v) * Math.min(1, (a - 0.06) / 0.94); };
+function controls() {
+  let u = dz(clamp(stick.x, -1, 1)), v = -dz(clamp(stick.y, -1, 1));
+  if (keys.KeyA || keys.ArrowLeft) u = -1; if (keys.KeyD || keys.ArrowRight) u = 1;
+  if (keys.KeyW || keys.ArrowUp) v = 1; if (keys.KeyS || keys.ArrowDown) v = -1;
+  if ($('invert').checked) v = -v;
+  return { u, v, b: boost || keys.Space || keys.ShiftLeft || keys.ShiftRight };
+}
+setInterval(() => {
+  if (!playing || !ws || ws.readyState !== 1) return;
+  const c = controls(), msg = JSON.stringify({ t: 'in', u: +c.u.toFixed(2), v: +c.v.toFixed(2), b: c.b ? 1 : 0 });
+  if (msg !== sent) { ws.send(msg); sent = msg; }
+}, 33);
+
+// ---------- UI ----------
+function buildSwatches() {
+  const box = $('swatches'); box.innerHTML = '';
+  COLORS.forEach((c, i) => {
+    const d = document.createElement('div'); d.className = 'sw' + (i === colorIdx ? ' on' : ''); d.style.background = c;
+    d.onclick = () => { colorIdx = i; store.set('color', i); buildSwatches(); };
+    box.appendChild(d);
+  });
+}
+$('name').value = store.get('name') || '';
+$('invert').checked = store.get('invert') === '1';
+$('invert').onchange = () => store.set('invert', $('invert').checked ? '1' : '0');
+function play() {
+  if (!ws || ws.readyState !== 1) return;
+  const name = $('name').value.trim(); store.set('name', name);
+  ws.send(JSON.stringify({ t: 'join', name, c: colorIdx }));
+  playing = true; sent = ''; deadAt = null;
+  $('menu').classList.add('hidden'); $('dead').classList.add('hidden'); $('ui').style.display = 'block';
+  if (isTouch) bb.style.display = 'flex';
+}
+function showMenu() { playing = false; $('menu').classList.remove('hidden'); $('ui').style.display = 'none'; bb.style.display = 'none'; }
+$('playBtn').onclick = play; $('againBtn').onclick = play;
+function onDead(m) {
+  playing = false; boost = false; bb.style.display = 'none'; deadAt = performance.now();
+  const best = Math.max(+(store.get('best') || 0), m.score); store.set('best', best);
+  $('deadTitle').textContent = m.by ? 'SHOT DOWN' : 'CRASHED';
+  $('deadBy').textContent = m.by ? 'You flew into ' + m.by + "'s contrail" : 'You ' + m.cause;
+  $('dScore').textContent = m.score; $('dKills').textContent = m.kills; $('dTime').textContent = m.secs + 's';
+  $('best').textContent = m.score >= best ? '🏆 New personal best!' : 'Personal best: ' + best;
+  setTimeout(() => { $('dead').classList.remove('hidden'); $('ui').style.display = 'none'; }, 1500);
+  // Monetization hook: request an interstitial / midgame ad here.
+}
+const esc = s => s.replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+function renderBoard() {
+  $('lbRows').innerHTML = lb.top.map((r, i) => `<div class="${r[2] === myId ? 'me' : ''}"><span>${i+1}. ${esc(r[0])}</span><span>${r[1]}</span></div>`).join('');
+}
+function pushFeed(text) {
+  const f = $('feed'), d = document.createElement('div'); d.textContent = text; f.prepend(d);
+  while (f.children.length > 5) f.lastChild.remove();
+  setTimeout(() => { d.style.opacity = 0; setTimeout(() => d.remove(), 600); }, 5000);
+}
+let toastT;
+function toast(t) { const e = $('toast'); e.textContent = t; e.style.opacity = 1; clearTimeout(toastT); toastT = setTimeout(() => e.style.opacity = 0, 1800); }
+
+// ---------- HUD (flight-sim style) ----------
+function terrainH(x, y) {
+  let m = 0;
+  for (const [ix, iy, r, h] of ISLANDS) { const rc = r * 0.92, d = Math.hypot(x - ix, y - iy); if (d < rc) m = Math.max(m, h * (1 - d / rc)); }
+  return m;
+}
+function drawHUD(me, now) {
+  hx.setTransform(DPR, 0, 0, DPR, 0, 0); hx.clearRect(0, 0, W, H);
+  if (!playing || !me) return;
+  const G = 'rgba(120,255,160,.9)', cx = W / 2, cy = H / 2;
+  hx.strokeStyle = G; hx.fillStyle = G; hx.lineWidth = 2; hx.font = '600 14px ui-monospace,Menlo,monospace'; hx.textAlign = 'center';
+  hx.shadowColor = 'rgba(0,0,0,.5)'; hx.shadowBlur = 3;
+  // boresight + stick marker
+  hx.beginPath(); hx.moveTo(cx - 22, cy); hx.lineTo(cx - 8, cy); hx.moveTo(cx + 8, cy); hx.lineTo(cx + 22, cy); hx.moveTo(cx, cy - 8); hx.lineTo(cx, cy - 4); hx.stroke();
+  const c = controls(), mx = cx + c.u * W * 0.35, my = cy - ( $('invert').checked ? -c.v : c.v) * H * 0.35;
+  hx.globalAlpha = 0.6; hx.beginPath(); hx.arc(mx, my, 9, 0, Math.PI * 2); hx.stroke();
+  hx.setLineDash([4, 6]); hx.beginPath(); hx.moveTo(cx, cy); hx.lineTo(mx, my); hx.stroke(); hx.setLineDash([]); hx.globalAlpha = 1;
+  // pitch ladder (simple)
+  hx.save(); hx.translate(cx, cy); hx.rotate(-me.iroll * 0.9);
+  for (let d = -30; d <= 30; d += 10) {
+    if (!d) continue; const yy = (me.ipitch * 57.3 - d) * 6;
+    if (Math.abs(yy) > H * 0.35) continue;
+    hx.globalAlpha = 0.3; hx.beginPath(); hx.moveTo(-90, yy); hx.lineTo(-40, yy); hx.moveTo(40, yy); hx.lineTo(90, yy); hx.stroke();
+    hx.fillText(Math.abs(d), -105, yy + 5);
+  }
+  hx.globalAlpha = 0.8; const hy = me.ipitch * 57.3 * 6; hx.beginPath(); hx.moveTo(-160, hy); hx.lineTo(-60, hy); hx.moveTo(60, hy); hx.lineTo(160, hy); hx.stroke();
+  hx.restore(); hx.globalAlpha = 1;
+  // speed / altitude boxes
+  const spd = Math.round((me.boost ? 10.5 : 5.6) * 30 * 1.6), alt = Math.round(me.ih * 3.2);
+  const boxAt = (x, label, val) => { hx.strokeRect(x - 45, cy - 16, 90, 32); hx.fillText(val, x, cy + 5); hx.font = '600 11px ui-monospace,Menlo,monospace'; hx.fillText(label, x, cy - 22); hx.font = '600 14px ui-monospace,Menlo,monospace'; };
+  boxAt(cx - 230, 'SPD KT', spd); boxAt(cx + 230, 'ALT FT', alt);
+  // heading tape
+  const hdg = ((me.ia * 57.3 + 90) % 360 + 360) % 360;
+  hx.save(); hx.beginPath(); hx.rect(cx - 160, 14, 320, 34); hx.clip();
+  for (let d = Math.floor((hdg - 40) / 10) * 10; d <= hdg + 40; d += 10) {
+    const xx = cx + (d - hdg) * 4, dd = (d + 360) % 360;
+    hx.beginPath(); hx.moveTo(xx, 40); hx.lineTo(xx, dd % 30 ? 44 : 36); hx.stroke();
+    if (dd % 30 === 0) hx.fillText(({ 0: 'N', 90: 'E', 180: 'S', 270: 'W' })[dd] ?? String(dd / 10).padStart(2, '0'), xx, 30);
+  }
+  hx.restore(); hx.beginPath(); hx.moveTo(cx, 48); hx.lineTo(cx - 6, 56); hx.lineTo(cx + 6, 56); hx.closePath(); hx.fill();
+  // score
+  hx.textAlign = 'left'; hx.font = '800 22px system-ui,sans-serif'; hx.fillStyle = '#fff';
+  hx.fillText(Math.floor(me.score), 16, H - 34);
+  hx.font = '600 13px system-ui,sans-serif'; hx.fillText(`Rank ${lb.rank || '—'} of ${lb.n || '—'}${me.boost ? '  ·  🔥 BOOST' : ''}`, 16, H - 14);
+  // warnings
+  const warns = [];
+  const fx = Math.cos(me.ia) * Math.cos(me.ipitch), fy = Math.sin(me.ia) * Math.cos(me.ipitch), fh = Math.sin(me.ipitch);
+  let terrainWarn = me.ih < 45 && me.ipitch < 0.05;
+  for (const d of [60, 120, 180]) if (me.ih + fh * d < terrainH(me.ix + fx * d, me.iy + fy * d) + 12) terrainWarn = true;
+  if (terrainWarn) warns.push(['PULL UP', '#ff4040']);
+  let near = false;
+  outer: for (const p of planes.values()) {
+    if (p === me) continue;
+    for (let i = 0; i < p.trail.length; i += 2) {
+      const t = p.trail[i], dx = t[0] - me.ix, dy = t[1] - me.iy, dh = t[2] - me.ih, dist = Math.hypot(dx, dy, dh);
+      if (dist < 130 && (dx * fx + dy * fy + dh * fh) > 0) { near = true; break outer; }
+    }
+  }
+  if (near) warns.push(['CONTRAIL PROXIMITY', '#ffb020']);
+  if (Math.hypot(me.ix, me.iy) > R - 300) warns.push(['STORM AHEAD — TURN BACK', '#ff4070']);
+  if (me.ih > CEIL - 30) warns.push(['SERVICE CEILING', '#ffb020']);
+  hx.textAlign = 'center'; hx.font = '800 20px ui-monospace,Menlo,monospace';
+  warns.forEach(([t, col], i) => { if ((now / 250 | 0) % 2 === 0 || i > 0) { hx.fillStyle = col; hx.fillText(t, cx, cy + 90 + i * 28); } });
+  // radar (heading-up)
+  const rr = 70, rx = W - rr - 14, ry = H - rr - 14;
+  hx.fillStyle = 'rgba(0,30,40,.5)'; hx.beginPath(); hx.arc(rx, ry, rr, 0, Math.PI * 2); hx.fill();
+  hx.strokeStyle = 'rgba(120,255,160,.5)'; hx.beginPath(); hx.arc(rx, ry, rr, 0, Math.PI * 2); hx.arc(rx, ry, rr / 2, 0, Math.PI * 2); hx.stroke();
+  const RANGE = 1500, rot = -me.ia - Math.PI / 2;
+  const toR = (x, y) => { const dx = x - me.ix, dy = y - me.iy, cs = Math.cos(rot), sn = Math.sin(rot); return [rx + (dx * cs - dy * sn) / RANGE * rr, ry + (dx * sn + dy * cs) / RANGE * rr]; };
+  hx.save(); hx.beginPath(); hx.arc(rx, ry, rr - 1, 0, Math.PI * 2); hx.clip();
+  hx.fillStyle = 'rgba(160,140,110,.6)';
+  for (const [x, y, r] of ISLANDS) { const [px, py] = toR(x, y); hx.beginPath(); hx.arc(px, py, r / RANGE * rr, 0, Math.PI * 2); hx.fill(); }
+  for (const p of planes.values()) {
+    if (p === me) continue; const [px, py] = toR(p.ix, p.iy);
+    hx.fillStyle = p.ih > me.ih + 40 ? '#9cf' : p.ih < me.ih - 40 ? '#fc9' : '#fff';
+    hx.beginPath(); hx.arc(px, py, 3, 0, Math.PI * 2); hx.fill();
+  }
+  hx.restore();
+  hx.fillStyle = G; hx.beginPath(); hx.moveTo(rx, ry - 6); hx.lineTo(rx - 4, ry + 4); hx.lineTo(rx + 4, ry + 4); hx.closePath(); hx.fill();
+  hx.shadowBlur = 0;
+}
+
+// ---------- main loop ----------
+let lastT = performance.now();
+const lerpAng = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  const alpha = Math.min(1.25, (now - lastPacket) / tickMs);
+  const me = planes.get(myId);
+
+  for (const p of planes.values()) {
+    const k = Math.min(1, alpha);
+    p.ix = p.px + (p.x - p.px) * alpha; p.iy = p.py + (p.y - p.py) * alpha; p.ih = p.ph + (p.h - p.ph) * alpha;
+    p.ia = lerpAng(p.pa, p.a, k); p.ipitch = p.pp + (p.pitch - p.pp) * k; p.iroll = p.pr + (p.roll - p.pr) * k;
+    const w = planeWidth(p.score);
+    p.obj.position.set(p.ix, p.ih, p.iy);
+    p.obj.rotation.set(p.iroll, -p.ia, p.ipitch);
+    p.obj.scale.setScalar(w / 14);
+    p.obj.userData.prop.rotation.x += dt * 40;
+    const fl = p.obj.userData.flame; fl.visible = !!p.boost; fl.scale.set(1, 0.8 + Math.random() * 0.6, 1);
+    p.label.position.set(p.ix, p.ih + w * 1.4 + 6, p.iy); p.label.visible = p.id !== myId;
+    p.tube.update(p.trail, [p.ix, p.iy, p.ih], w / 2);
+  }
+
+  // orbs
+  let n = 0;
+  const cxp = me ? me.ix : camPos.x, cyp = me ? me.iy : camPos.z;
+  for (const o of orbs.values()) {
+    if (n >= MAX_ORBS) break;
+    if (Math.abs(o.x - cxp) > 1900 || Math.abs(o.y - cyp) > 1900) continue;
+    const s = (3 + Math.sqrt(o.v) * 2.6) * Math.min(1, (now - o.born) / 300);
+    dummy.position.set(o.x, o.h + Math.sin(now / 400 + o.x) * 2, o.y);
+    dummy.rotation.set(0, now / 600 + o.y, 0.4); dummy.scale.set(s, s * 1.3, s); dummy.updateMatrix();
+    orbMesh.setMatrixAt(n, dummy.matrix); orbMesh.setColorAt(n, ORB_COLS[o.c] || ORB_COLS[0]); n++;
+  }
+  orbMesh.count = n; orbMesh.instanceMatrix.needsUpdate = true; if (orbMesh.instanceColor) orbMesh.instanceColor.needsUpdate = true;
+
+  // particles
+  parts = parts.filter(q => {
+    q.life -= dt * 0.9; if (q.life <= 0) { scene.remove(q.m); return false; }
+    q.v.y -= dt * 3; q.m.position.addScaledVector(q.v, dt * 30); q.v.multiplyScalar(0.97);
+    q.m.rotation.x += dt * 5; q.m.rotation.y += dt * 4; q.m.scale.setScalar(q.s * q.life + 0.2); return true;
+  });
+
+  // camera
+  if (me) {
+    const w = planeWidth(me.score), cp = Math.cos(me.ipitch);
+    const fwd = new THREE.Vector3(Math.cos(me.ia) * cp, Math.sin(me.ipitch), Math.sin(me.ia) * cp);
+    const head = new THREE.Vector3(me.ix, me.ih, me.iy);
+    const desired = head.clone().addScaledVector(new THREE.Vector3(fwd.x, fwd.y * 0.5, fwd.z), -(46 + w * 2.6)); desired.y += 22 + w * 1.1;
+    camPos.lerp(desired, 1 - Math.pow(0.0005, dt));
+    camLook.lerp(head.clone().addScaledVector(fwd, 60), 1 - Math.pow(0.0001, dt));
+    camera.position.copy(camPos); camera.lookAt(camLook); camera.rotateZ(-me.iroll * 0.3);
+    fov += ((me.boost ? 82 : 70) - fov) * Math.min(1, dt * 4);
+  } else {
+    specAngle += dt * 0.05;
+    const c = new THREE.Vector3(camLook.x, 0, camLook.z);
+    if (deadAt === null) c.set(0, 0, 0);
+    const target = new THREE.Vector3(c.x + Math.cos(specAngle) * 700, 260, c.z + Math.sin(specAngle) * 700);
+    camPos.lerp(target, 1 - Math.pow(0.3, dt)); camera.position.copy(camPos);
+    camera.lookAt(c.x, 120, c.z); fov += (70 - fov) * dt;
+  }
+  camera.fov = fov; camera.updateProjectionMatrix();
+
+  renderer.render(scene, camera);
+  drawHUD(me, now);
+}
+
+buildSwatches(); connect(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
