@@ -12,7 +12,13 @@ The only dependency is `ws`. three.js r187 is included in `public/vendor/` (no C
 
 ## Architecture
 - `server.js`: Node `http` + `ws`. **The server runs all game logic** (clients only send inputs).
-  - 30 Hz tick loop. Each `Room` holds up to `ROOM_HUMANS` (50) real players. A new room opens automatically when one is full.
+  - 30 Hz tick loop. Each `Room` holds up to `ROOM_HUMANS` (50) seated players, up to `MAX_ROOMS` (2) rooms per process.
+    A seat = flying, or died less than 30 s ago (`isSeated`). New sockets spectate the busiest room without a seat; on `join`
+    the player keeps their current room if it has a seat, else `pickRoom` picks the fullest room with space (or opens one),
+    else sends `full`. Moving rooms sends `reset`.
+  - Production guards: ping/pong heartbeat (15 s), backpressure (skip state when `bufferedAmount` > 256 KB, kill when
+    > 1 MB for 5 s), `MAX_PER_IP`, `ALLOWED_ORIGINS`, 60 msgs/s input cap, name blocklist (`cleanName`), graceful
+    SIGTERM (`restart` then close 4503), per-room try/catch in the tick loop, tick timing in `/health`.
   - Bots top each room up to `BOT_FILL` (30) planes and leave as humans join (`manageBots`). Bot AI is in `botThink`
     (avoids obstacles, collects orbs, hunts by cutting in front of other planes).
   - Spatial hash grid (`CELL`=100) of contrail points, used for collisions, and of orbs, used for pickups.
@@ -31,7 +37,10 @@ with `rotation.order='YZX'`, `rotation = (roll, -a, pitch)`.
 - client→server: `{t:'join', name, c}`, `{t:'in', u: turn -1..1, v: pitch -1..1, b: boost 0/1}`
 - server→client: `welcome {R, CEIL, islands, colors}`; every tick `s {me, p:[[id,x,y,h,a*100,pitch*100,roll*100,score,boost]],
   n:[[id,name,color,score,a*100,pitch*100,flatTrail]], g:[goneIds], o:[[id,x,y,h,v,c]], x:[eatenOrbIds], d:[[x,y,h,c]]}`;
-  `lb` (leaderboard, twice a second), `k` (kill feed), `kill`, `dead`.
+  `lb` (leaderboard, twice a second), `k` (kill feed), `kill`, `dead`, `full` (every room full; client retries in 10 s),
+  `reset` (moved to another room: drop planes/orbs), `restart` (server shutting down).
+- WebSocket close codes 4xxx carry a reason the client shows: 4029 too many per IP, 4003 bad origin, 4503 restarting.
+  The client reconnects after 10 s for 4xxx (1.5 s for 4503 and normal drops).
 
 ### IMPORTANT: shared formulas
 `trailTarget`, `planeWidth` and the trail trimming logic exist in BOTH server.js and index.html. They must stay identical,
@@ -93,6 +102,9 @@ Accounts and a daily leaderboard, party links (play with friends in the same roo
 ## Testing
 Playwright is a good way to check visuals: launch Chromium with
 `--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader` for WebGL, click #playBtn, take screenshots.
-For load testing, a script that opens N `ws` clients sending random `in` messages; check CPU and bytes per client.
-Last measured on the 2D version: about 45 clients, about 10% of one CPU core, about 13 KB/s per client. Expect the 3D version to be
-somewhat higher (3D contrail points); re-measure.
+Load test: `TRUST_PROXY=1 PORT=4321 npm start`, then `node scripts/loadtest.js 50 ws://localhost:4321 30` (it fakes
+`X-Forwarded-For` per client to get past `MAX_PER_IP`, so the server needs `TRUST_PROXY=1`).
+Measured 2026-11-17 on an M3 Pro (load-test clients on the same machine): ~40 KB/s per client at every size;
+50 clients = 1 room, tick avg 10 ms / max 34 ms, 35% CPU; 100 = 2 rooms, avg 12 ms; 200 = 4 rooms, avg 25 ms / max 103 ms
+(overloaded). Re-measure on the production VPS before raising `MAX_ROOMS`.
+Deploy: Hetzner + Caddy + Cloudflare, files in `deploy/` (see README "Launch").

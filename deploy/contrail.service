@@ -1,0 +1,32 @@
+# systemd unit for Contrail.io. Installed to /etc/systemd/system/contrail.service by deploy/setup.sh.
+[Unit]
+Description=Contrail.io game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=contrail
+WorkingDirectory=/opt/contrail
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=2
+# SIGTERM -> server tells players it's restarting, then exits within ~2.5 s
+KillSignal=SIGTERM
+TimeoutStopSec=10
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=TRUST_PROXY=1
+# 2 arenas x 50 players fits a Hetzner CX22. Re-run scripts/loadtest.js on the box before raising it.
+Environment=MAX_ROOMS=2
+Environment=ROOM_HUMANS=50
+# Comma-separated, e.g. https://contrail.io,https://www.contrail.io (setup.sh fills this in)
+Environment=ALLOWED_ORIGINS=
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+# Caddy gets and renews the HTTPS certificate itself, and proxies WebSockets with no extra config.
+# setup.sh replaces DOMAIN with your domain.
+DOMAIN {
+	encode zstd gzip
+	reverse_proxy localhost:3000
+}

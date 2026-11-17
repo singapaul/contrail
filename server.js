@@ -14,6 +14,13 @@ const ORB_TARGET = 1400;
 const ROOM_HUMANS = +(process.env.ROOM_HUMANS || 50);
 const BOT_FILL = +(process.env.BOT_FILL ?? 30);
 const MIN_BOTS = +(process.env.MIN_BOTS ?? 8);
+const MAX_ROOMS = +(process.env.MAX_ROOMS || 2);          // hard cap on arenas per process (load test: 2 x 50 fits a small VPS)
+const MAX_PER_IP = +(process.env.MAX_PER_IP || 8);        // sockets per IP (schools/cafés share IPs, so not too low)
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';      // read CF-Connecting-IP / X-Forwarded-For
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const SEAT_HOLD_MS = 30000;    // a dead player keeps their seat in the arena this long
+const SLOW_SKIP = 256 * 1024, SLOW_KILL = 1024 * 1024;   // ws.bufferedAmount thresholds (bytes)
+const MAX_MSGS_PER_SEC = 60;
 const CELL = 100;
 const VIEW = 1900;             // interest radius (client fog hides beyond ~1800)
 const SPEED = 5.6, BOOST_SPEED = 10.5;
@@ -123,7 +130,13 @@ class Room {
     this.planes.set(p.id, p);
     return p;
   }
-  humanCount() { return this.clients.size; }
+  // Seats are held by players flying, or who died recently. Menu spectators don't count.
+  isSeated(c, now) { return !!c.plane || (c.deadAt > 0 && now - c.deadAt < SEAT_HOLD_MS); }
+  humanCount(except = null) {
+    const now = Date.now(); let n = 0;
+    for (const c of this.clients) if (c !== except && this.isSeated(c, now)) n++;
+    return n;
+  }
 
   kill(p, killer, cause) {
     if (!p.alive) return;
@@ -144,7 +157,7 @@ class Room {
     if (p.score > 60 || !p.bot || (killer && !killer.bot)) for (const c of this.clients) send(c, { t: 'k', m: msg });
     if (p.client) {
       const c = p.client;
-      c.plane = null; c.cam = [p.x, p.y];
+      c.plane = null; c.cam = [p.x, p.y]; c.deadAt = Date.now();
       send(c, { t: 'dead', score: Math.floor(p.score), kills: p.kills, by: killer ? killer.name : null, cause,
         secs: Math.round((Date.now() - p.born) / 1000) });
     }
@@ -301,7 +314,16 @@ class Room {
     if (this.tickN % 30 === 0) for (const o of this.orbs.values()) if (o.ttl && o.ttl < this.tickN) this.removeOrb(o);
     for (let i = 0; i < 15 && this.natural < ORB_TARGET; i++) this.spawnNaturalOrb();
 
-    for (const c of this.clients) this.sendState(c);
+    for (const c of this.clients) {
+      // Backpressure: skip the whole state message (so known-sets stay in step with what the client has).
+      const buf = c.ws.bufferedAmount;
+      if (buf > SLOW_SKIP) {
+        if (buf > SLOW_KILL) { c.slowSince ||= Date.now(); if (Date.now() - c.slowSince > 5000) c.ws.terminate(); }
+        continue;
+      }
+      c.slowSince = 0;
+      this.sendState(c);
+    }
     if (this.tickN % 15 === 0) this.sendBoard();
   }
 
@@ -356,50 +378,165 @@ const rooms = [new Room(0)];
 let roomSeq = 1;
 const totalOnline = () => rooms.reduce((a, r) => a + r.clients.size, 0);
 function send(c, obj) { if (c.ws.readyState === 1) c.ws.send(JSON.stringify(obj)); }
-function pickRoom() {
-  let r = rooms.find(r => r.humanCount() < ROOM_HUMANS);
-  if (!r) { r = new Room(roomSeq++); rooms.push(r); }
-  return r;
+// Room for a player taking off: the fullest arena with a free seat (keeps arenas lively),
+// else a new arena if under MAX_ROOMS, else null (server full).
+function pickRoom(except) {
+  let best = null, bestN = -1;
+  for (const r of rooms) {
+    const n = r.humanCount(except);
+    if (n < ROOM_HUMANS && n > bestN) { best = r; bestN = n; }
+  }
+  if (!best && rooms.length < MAX_ROOMS) { best = new Room(roomSeq++); rooms.push(best); }
+  return best;
+}
+// Room a menu tab watches in the background: the busiest one. Watching doesn't take a seat.
+function spectateRoom() {
+  return rooms.reduce((a, r) => (r.humanCount() > a.humanCount() ? r : a), rooms[0]);
+}
+function leaveRoom(c) {
+  const room = c.room;
+  if (c.plane) room.planes.delete(c.plane.id);
+  c.plane = null;
+  room.clients.delete(c);
+  if (room.clients.size === 0 && room !== rooms[0]) rooms.splice(rooms.indexOf(room), 1);
+}
+function moveTo(c, room) {
+  leaveRoom(c);
+  c.room = room; room.clients.add(c);
+  c.knownP.clear(); c.knownO.clear();
+  send(c, { t: 'reset' });           // client drops planes/orbs from the old arena
+}
+
+// ---------- names ----------
+const BLOCKED = ['fuck', 'shit', 'cunt', 'nigg', 'faggot', 'rapist', 'nazi', 'hitler', 'kike', 'chink', 'retard',
+  'twat', 'wank', 'whore', 'slut', 'porn', 'penis', 'vagina'];
+const LEET = { 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', '@': 'a', $: 's', '!': 'i' };
+function cleanName(raw) {
+  const name = String(raw || '').replace(/[^\w \-.!?']/g, '').trim().slice(0, 16);
+  const norm = name.toLowerCase().replace(/[013457@$!]/g, ch => LEET[ch]).replace(/[^a-z]/g, '');
+  return !name || BLOCKED.some(w => norm.includes(w)) ? 'Pilot' : name;
+}
+
+// ---------- connection limits ----------
+const perIp = new Map();
+function clientIp(req) {
+  if (TRUST_PROXY) {
+    const cf = req.headers['cf-connecting-ip'];
+    if (cf) return String(cf).trim();
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) return String(xff).split(',')[0].trim();
+  }
+  return req.socket.remoteAddress || '?';
 }
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 const PUB = path.join(__dirname, 'public');
 const server = http.createServer((req, res) => {
   const url = decodeURIComponent((req.url || '/').split('?')[0]);
-  if (url === '/health') { res.end(JSON.stringify({ ok: true, online: totalOnline(), rooms: rooms.length })); return; }
+  if (url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ ok: true, online: totalOnline(), rooms: rooms.map(r => ({ id: r.id, seated: r.humanCount(),
+      connected: r.clients.size, planes: r.planes.size })), maxRooms: MAX_ROOMS, roomHumans: ROOM_HUMANS, tick: tickStats() }));
+    return;
+  }
   const file = path.normalize(path.join(PUB, url === '/' ? 'index.html' : url));
   if (!file.startsWith(PUB)) { res.writeHead(403); res.end(); return; }
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    // vendor/ rarely changes; index.html must always be revalidated so deploys show up straight away.
+    const cache = url.startsWith('/vendor/') ? 'public, max-age=604800' : 'no-cache';
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': cache });
     res.end(data);
   });
 });
 
 const wss = new WebSocketServer({ server, maxPayload: 512 });
-wss.on('connection', ws => {
-  const room = pickRoom();
-  const c = { ws, room, plane: null, cam: [0, 0], knownP: new Set(), knownO: new Set() };
+let shuttingDown = false;
+wss.on('connection', (ws, req) => {
+  // Close codes 4xxx tell the client to show the reason and back off before reconnecting.
+  if (shuttingDown) { ws.close(4503, 'Server updating, reconnecting…'); return; }
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.length && !ALLOWED_ORIGINS.includes(origin)) { ws.close(4003, 'Origin not allowed'); return; }
+  const ip = clientIp(req);
+  const ipN = (perIp.get(ip) || 0) + 1;
+  if (ipN > MAX_PER_IP) { ws.close(4029, 'Too many connections from your network'); return; }
+  perIp.set(ip, ipN);
+
+  const room = spectateRoom();
+  const c = { ws, room, ip, plane: null, cam: [0, 0], knownP: new Set(), knownO: new Set(), deadAt: 0,
+    alive: true, slowSince: 0, msgN: 0, msgT: Date.now() };
   room.clients.add(c);
   send(c, { t: 'welcome', R: WORLD_R, CEIL, islands: ISLANDS, colors: COLORS });
+  ws.on('pong', () => { c.alive = true; });
   ws.on('message', raw => {
+    const now = Date.now();
+    if (now - c.msgT >= 1000) { c.msgT = now; c.msgN = 0; }
+    if (++c.msgN > MAX_MSGS_PER_SEC) return;
     let m; try { m = JSON.parse(raw); } catch { return; }
     if (!m || typeof m !== 'object') return;
     if (m.t === 'in' && c.plane) {
       if (Number.isFinite(m.u)) c.plane.tu = clamp(m.u, -1, 1);
       if (Number.isFinite(m.v)) c.plane.pv = clamp(m.v, -1, 1);
       c.plane.boost = !!m.b;
-    } else if (m.t === 'join' && !c.plane) {
-      const name = String(m.name || '').replace(/[^\w \-.!?']/g, '').trim().slice(0, 16) || 'Pilot';
-      c.plane = room.addPlane(name, Math.abs(m.c | 0), c);
+    } else if (m.t === 'join' && !c.plane && !shuttingDown) {
+      // Stay in the current arena if it has a seat (keeps your spot after dying), otherwise find one.
+      let target = c.room.humanCount(c) < ROOM_HUMANS ? c.room : pickRoom(c);
+      if (!target) { send(c, { t: 'full' }); return; }
+      if (target !== c.room) moveTo(c, target);
+      c.deadAt = 0;
+      c.plane = c.room.addPlane(cleanName(m.name), Math.abs(m.c | 0), c);
     }
   });
   ws.on('close', () => {
-    if (c.plane) room.planes.delete(c.plane.id);
-    room.clients.delete(c);
-    if (room.clients.size === 0 && room !== rooms[0]) rooms.splice(rooms.indexOf(room), 1);
+    leaveRoom(c);
+    const n = (perIp.get(ip) || 1) - 1;
+    if (n > 0) perIp.set(ip, n); else perIp.delete(ip);
   });
 });
 
-setInterval(() => { for (const r of rooms) r.tick(); }, 1000 / TICK_RATE);
-server.listen(PORT, () => console.log(`Contrail running on http://localhost:${PORT}`));
+// Heartbeat: drop half-open sockets (phones losing signal, closed laptops) so they free their seat.
+setInterval(() => {
+  for (const r of rooms) for (const c of r.clients) {
+    if (!c.alive) { c.ws.terminate(); continue; }
+    c.alive = false; c.ws.ping();
+  }
+}, 15000);
+
+// ---------- tick loop + stats ----------
+const tickTimes = [];          // ms per tick, last 30 s
+function tickStats() {
+  if (!tickTimes.length) return { avgMs: 0, maxMs: 0 };
+  const sum = tickTimes.reduce((a, b) => a + b, 0);
+  return { avgMs: +(sum / tickTimes.length).toFixed(2), maxMs: +Math.max(...tickTimes).toFixed(2), budgetMs: +(1000 / TICK_RATE).toFixed(1) };
+}
+let lastTickErr = 0;
+setInterval(() => {
+  const t0 = performance.now();
+  for (const r of rooms) {
+    try { r.tick(); } catch (err) {
+      if (Date.now() - lastTickErr > 5000) { lastTickErr = Date.now(); console.error(`room ${r.id} tick failed:`, err); }
+    }
+  }
+  tickTimes.push(performance.now() - t0);
+  if (tickTimes.length > TICK_RATE * 30) tickTimes.shift();
+}, 1000 / TICK_RATE);
+
+// ---------- process lifecycle ----------
+function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${sig}: telling ${totalOnline()} clients we're restarting`);
+  for (const r of rooms) for (const c of r.clients) send(c, { t: 'restart' });
+  server.close();
+  setTimeout(() => {
+    for (const r of rooms) for (const c of r.clients) c.ws.close(4503, 'Server updating, reconnecting…');
+    setTimeout(() => process.exit(0), 300);
+  }, 2000);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+// Don't keep running in an unknown state; systemd restarts us.
+process.on('uncaughtException', err => { console.error('uncaughtException:', err); process.exit(1); });
+process.on('unhandledRejection', err => { console.error('unhandledRejection:', err); process.exit(1); });
+
+server.listen(PORT, () => console.log(`Contrail running on http://localhost:${PORT} (max ${MAX_ROOMS} arenas × ${ROOM_HUMANS} players)`));
